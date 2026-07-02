@@ -1,0 +1,54 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# CrescentPHP — Apache mod_rewrite
+# Redireciona todas as requisições para app.php (front controller).
+# ──────────────────────────────────────────────────────────────────────────────
+
+Options -Indexes
+
+# Bloqueia acesso direto a arquivos sensíveis
+<FilesMatch "^(\.env|\.env\..*|composer\.lock|package-lock\.json|llm\.md)$">
+    Order deny,allow
+    Deny from all
+</FilesMatch>
+
+# Bloqueia acesso direto ao código fonte interno
+<IfModule mod_rewrite.c>
+    RewriteRule ^(crescent|src|migrations|tests|config|logs)(/|$) - [F,L]
+</IfModule>
+
+# Cache de longa duração para assets estáticos versionados
+<IfModule mod_expires.c>
+    ExpiresActive On
+    ExpiresByType text/css              "access plus 1 year"
+    ExpiresByType application/javascript "access plus 1 year"
+    ExpiresByType image/png             "access plus 1 year"
+    ExpiresByType image/jpeg            "access plus 1 year"
+    ExpiresByType image/svg+xml         "access plus 1 year"
+    ExpiresByType image/webp            "access plus 1 year"
+    ExpiresByType font/woff2            "access plus 1 year"
+</IfModule>
+
+# Bloqueia acesso ao diretório de logs e migrações
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteBase /
+
+    # Não redireciona arquivos/diretórios reais (assets, uploads etc.)
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+
+    # Tudo vira app.php
+    RewriteRule ^ app.php [QSA,L]
+</IfModule>
+
+# Compatibilidade com PHP-FPM em alguns planos compartilhados
+<IfModule mod_fcgid.c>
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ app.php [QSA,L]
+</IfModule>
+
+# Compressão gzip (se disponível)
+<IfModule mod_deflate.c>
+    AddOutputFilterByType DEFLATE text/html text/plain text/css application/json application/javascript
+</IfModule>

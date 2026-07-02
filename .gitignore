@@ -1,0 +1,38 @@
+# Ambiente
+.env
+.env.local
+.env.*.local
+
+# Dependências (sem Composer por design)
+vendor/
+
+# Logs e cache
+logs/
+*.log
+*.log.*
+
+# Rate limit storage temporário
+/tmp/crescent_rate/
+
+# Uploads
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+__MACOSX/
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# PHP
+*.phar
+
+# Contexto para IA (descomente para não commitar)
+# llm.md
