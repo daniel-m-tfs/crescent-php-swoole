@@ -44,16 +44,17 @@ services:
     restart: unless-stopped
     environment:
       MYSQL_DATABASE:      ${DB_NAME:-crescent}
-      MYSQL_USER:          ${DB_USER:-crescent}
-      MYSQL_PASSWORD:      ${DB_PASS:-crescent}
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS:-rootsecret}
+      # MYSQL_USER/MYSQL_PASSWORD só aceitam usuários não-root.
+      # Se DB_USER=root no .env, use apenas MYSQL_ROOT_PASSWORD.
+      # Para usuário dedicado, defina DB_USER=crescent e DB_PASS=crescent no .env.
+      MYSQL_ROOT_PASSWORD: ${DB_PASS:-rootsecret}
     ports:
       # Expõe apenas localmente para acesso por ferramentas (TablePlus, DBeaver)
       - "127.0.0.1:${DB_EXTERNAL_PORT:-3306}:3306"
     volumes:
       - crescent_db:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASS:-rootsecret}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASS:-rootsecret}"]
       interval: 10s
       timeout: 5s
       retries: 5

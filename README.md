@@ -538,7 +538,17 @@ php crecli.php migrate:status
 php crecli.php routes        # lista todas as rotas
 php crecli.php test          # roda todos os testes
 php crecli.php serve 3000    # servidor built-in na porta 3000
+
+# Docker — gerenciar containers pelo crecli
+php crecli.php docker:up              # sobe os containers (sem rebuild)
+php crecli.php docker:rebuild         # reconstrói imagem + sobe (use ao alterar crescent/)
+php crecli.php docker:restart         # reinicia todos os containers
+php crecli.php docker:restart app     # reinicia só o app
+php crecli.php docker migrate         # roda comando crecli dentro do container
+php crecli.php docker migrate:status  # qualquer subcomando dentro do container
 ```
+
+> **Regra:** mudou `src/` → `docker:restart app` (volume montado). Mudou `crescent/`, `Dockerfile` ou `docker/php.ini` → `docker:rebuild`.
 
 ---
 
@@ -577,26 +587,31 @@ Tests::describe('UserModel', function () {
 ```
 
 ```bash
-# Subir tudo
+# Via crecli (recomendado)
+php crecli.php docker:up              # sobe sem rebuild
+php crecli.php docker:rebuild         # reconstrói imagem e sobe
+php crecli.php docker:restart app     # reinicia só o app
+php crecli.php docker migrate         # roda migrations no container
+
+# Via Docker direto
 docker compose up --build
-
-# Recriar apenas o app após alterar código
-docker compose restart app
-
-# Executar comandos CLI dentro do container
 docker compose exec app php crecli.php migrate
-docker compose exec app php crecli.php make:module products
 ```
 
-Variáveis de ambiente do Docker (defina no `.env` ou em `docker-compose.yml`):
+> **Atenção MySQL:** `DB_USER=root` no `.env` causa erro no MySQL 8 (`MYSQL_USER` não aceita `root`).
+> Use `DB_USER=crescent` (ou outro usuário dedicado) e defina `DB_PASS` como senha desse usuário.
+> A senha do root é controlada por `DB_ROOT_PASS` — usada internamente pelo `docker-compose.yml`.
+
+Variáveis de ambiente do Docker (defina no `.env`):
 
 | Variável | Padrão | Descrição |
 |---|---|---|
 | `APP_PORT` | `9501` | Porta exposta no host |
 | `SWOOLE_HOST` | `0.0.0.0` | Host de bind do Swoole |
 | `SWOOLE_PORT` | `9501` | Porta interna do Swoole |
-| `DB_ROOT_PASS` | `rootsecret` | Senha root do MySQL |
+| `DB_ROOT_PASS` | `rootsecret` | Senha root do MySQL (nunca use root como DB_USER) |
 | `REDIS_EXTERNAL_PORT` | `6379` | Porta Redis no host |
+| `DOCKER_SERVICE` | `app` | Nome do serviço alvo de `php crecli.php docker <cmd>` |
 
 ---
 
@@ -678,8 +693,16 @@ meu-projeto/
 │       │   ├── users_all.php
 │       │   └── users_crud.php
 │       └── routes/
-│           └── usersRoutes.php
-├── migrations/
+│           └── usersRoutes.php   └── chat/                          # Exemplo de módulo WebSocket
+       ├── init.php                   # require das rotas HTTP + WS
+       ├── controllers/
+       │   ├── chatController.php     # GET /chat  e  GET /api/chat/status
+       │   └── chatWsController.php   # eventos WS: onOpen/onMessage/onClose
+       ├── routes/
+       │   ├── chatRoutes.php         # rotas HTTP do chat
+       │   └── chatWsRoutes.php       # rotas WebSocket (/ws/chat, /ws/notify/:channel)
+       └── views/
+           └── chat.php               # interface web completa (HTML + CSS + JS)├── migrations/
 │   ├── 20260108230701_create_users_table.php
 │   └── 20260413000000_create_auth_tables.php
 ├── tests/

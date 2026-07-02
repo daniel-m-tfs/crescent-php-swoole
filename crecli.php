@@ -20,6 +20,10 @@
  *   test [arquivo]            — Roda testes (todos ou específico)
  *   serve [porta]             — Inicia servidor PHP built-in (dev)
  *   swoole:start [host] [p]   — Inicia servidor Swoole (HTTP + WebSocket)
+ *   docker <comando> [args]   — Executa qualquer comando crecli dentro do container Docker
+ *   docker:up                  — Sobe os containers (docker compose up -d)
+ *   docker:rebuild             — Reconstrói a imagem e sobe (docker compose up --build -d)
+ *   docker:restart [serviço]   — Reinicia um ou todos os containers
  */
 
 declare(strict_types=1);
@@ -75,6 +79,10 @@ class CrescentCLI
             'test'            => 'runTests',
             'serve'           => 'serve',
             'swoole:start'    => 'swooleStart',
+            'docker'          => 'dockerProxy',
+            'docker:up'       => 'dockerUp',
+            'docker:rebuild'  => 'dockerRebuild',
+            'docker:restart'  => 'dockerRestart',
             'help'            => 'help',
         ];
 
@@ -339,6 +347,87 @@ class CrescentCLI
         passthru("php -S {$host}:{$port} " . escapeshellarg(APP_ROOT . '/app.php'));
     }
 
+    // ─── Docker proxy ──────────────────────────────────────────────────────────
+
+    /**
+     * docker <comando> [args]
+     * Encaminha qualquer subcomando crecli para dentro do container.
+     */
+    private function dockerProxy(): void
+    {
+        $subCommand = array_shift($this->args);
+
+        if (!$subCommand) {
+            $this->error('Informe o comando a executar. Ex: php crecli.php docker migrate');
+            $this->info('Uso: php crecli.php docker <comando> [argumentos]');
+            exit(1);
+        }
+
+        $extraArgs = implode(' ', array_map('escapeshellarg', $this->args));
+        $cmd       = trim("php crecli.php {$subCommand} {$extraArgs}");
+        $service   = \Crescent\Utils\Env::get('DOCKER_SERVICE', 'app');
+        $full      = "docker compose exec {$service} {$cmd}";
+
+        $this->info("→ {$full}\n");
+        passthru($full, $exitCode);
+        exit($exitCode);
+    }
+
+    /**
+     * docker:up
+     * Sobe todos os containers em modo detached (sem rebuild).
+     * Útil após um `docker compose down` ou para iniciar o ambiente.
+     */
+    private function dockerUp(): void
+    {
+        $this->info("→ docker compose up -d\n");
+        passthru('docker compose up -d', $exitCode);
+        if ($exitCode === 0) {
+            $this->success('Containers iniciados.');
+        }
+        exit($exitCode);
+    }
+
+    /**
+     * docker:rebuild
+     * Reconstrói a imagem do app e sobe todos os containers.
+     * Use sempre que alterar arquivos fora dos volumes montados
+     * (crescent/, Dockerfile, docker/php.ini, etc.).
+     */
+    private function dockerRebuild(): void
+    {
+        $this->info("→ docker compose up --build -d\n");
+        passthru('docker compose up --build -d', $exitCode);
+        if ($exitCode === 0) {
+            $this->success('Imagem reconstruída e containers iniciados.');
+        }
+        exit($exitCode);
+    }
+
+    /**
+     * docker:restart [serviço]
+     * Reinicia um serviço específico ou todos os containers.
+     *
+     * Exemplos:
+     *   php crecli.php docker:restart          → reinicia todos
+     *   php crecli.php docker:restart app      → reinicia só o app
+     *   php crecli.php docker:restart db       → reinicia só o banco
+     */
+    private function dockerRestart(): void
+    {
+        $service = $this->args[0] ?? '';
+        $target  = $service ? escapeshellarg($service) : '';
+        $cmd     = trim("docker compose restart {$target}");
+
+        $this->info("→ {$cmd}\n");
+        passthru($cmd, $exitCode);
+        if ($exitCode === 0) {
+            $label = $service ?: 'todos os containers';
+            $this->success("Reiniciado: {$label}.");
+        }
+        exit($exitCode);
+    }
+
     // ─── Swoole ───────────────────────────────────────────────────────────────
 
     private function swooleStart(): void
@@ -390,16 +479,25 @@ class CrescentCLI
           serve [porta]             Inicia servidor de desenvolvimento (PHP built-in)
           swoole:start [host] [p]   Inicia servidor Swoole (HTTP + WebSocket)
 
-        \033[33mDocker:\033[0m
-          docker compose up         Sobe app + MySQL + Redis com Swoole
-          docker compose up --build Reconstrói a imagem e sobe
+        \033[33mDocker:─ gerenciar containers ──────────────────────────\033[0m
+          docker:up                 Sobe os containers (sem rebuild)
+          docker:rebuild            Reconstrói imagem e sobe (use ao alterar crescent/)
+          docker:restart [serviço]  Reinicia tudo ou um serviço específico
+          docker <cmd> [args]       Executa qualquer comando crecli dentro do container
 
-        \033[2mExemplos:\033[0m
+        \033[2mExemplos:───────────────────────────────────────────────────────────────\033[0m
           php crecli.php make:module products
           php crecli.php migrate
           php crecli.php serve 3000
           php crecli.php swoole:start
-          php crecli.php swoole:start 127.0.0.1 9502
+          php crecli.php docker:up
+          php crecli.php docker:rebuild
+          php crecli.php docker:restart
+          php crecli.php docker:restart app
+          php crecli.php docker migrate
+          php crecli.php docker migrate:status
+          php crecli.php docker migrate:rollback 2
+          php crecli.php docker make:module orders
 
         HELP;
     }

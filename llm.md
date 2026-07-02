@@ -56,6 +56,7 @@ crescent/middleware/
   cors.php                CORS configurável
   logger.php              Log em arquivo com rotation
   security.php            Headers de segurança + rate limiting
+                          ATENÇÃO: header_remove() só roda fora de CLI (não aplica em Swoole)
 crescent/utils/
   env.php                 Env::get/set/load/isProduction/isDevelopment
   hash.php                Hash::make/verify/needsRehash/token/uuid
@@ -70,6 +71,17 @@ src/
   shared/components/      Componentes reutilizáveis: layout.php, card.php, alert.php
   auth/                   Módulo de autenticação completo
   users/                  Módulo de usuários
+  chat/                   Módulo de exemplo WebSocket
+    init.php              require chatRoutes.php + chatWsRoutes.php
+    controllers/
+      chatController.php     GET /chat, GET /api/chat/status
+      chatWsController.php   eventos WS: onOpen/onMessage/onClose dos dois canais
+                             mantém mapa fd→número amigável (counter sequencial)
+    routes/
+      chatRoutes.php         rotas HTTP do chat
+      chatWsRoutes.php       $app->ws('/ws/chat') + $app->ws('/ws/notify/:channel')
+    views/
+      chat.php               interface web completa (HTML/CSS/JS nativo)
 migrations/               Arquivos de migration com timestamp
 tests/                    test-*.php — carregados por crecli test
 logs/                     Criado automaticamente
@@ -217,11 +229,26 @@ $ctx->connectionCount()              // número de WS ativos
 ## DOCKER
 
 ```bash
-docker compose up --build          # sobe app (Swoole) + MySQL 8 + Redis 7
-docker compose restart app         # recarrega após mudar código
+# Via crecli (recomendado)
+php crecli.php docker:up              # docker compose up -d (sem rebuild)
+php crecli.php docker:rebuild         # docker compose up --build -d
+php crecli.php docker:restart         # reinicia todos os containers
+php crecli.php docker:restart app     # reinicia só o app
+php crecli.php docker <cmd> [args]    # executa qualquer crecli dentro do container
+
+# Equivalentes diretos
+docker compose up --build -d
+docker compose restart app
 docker compose exec app php crecli.php migrate
-docker compose exec app php crecli.php swoole:start
 ```
+
+**Regra de quando usar cada um:**
+- Mudou `src/` → `docker:restart app` (volume montado, sem rebuild)
+- Mudou `crescent/`, `Dockerfile`, `docker/php.ini` → `docker:rebuild`
+
+**Problema MySQL 8 com DB_USER=root:** `MYSQL_USER=root` é inválido no MySQL 8 — ele só aceita usuários não-root nesse parâmetro. O `docker-compose.yml` usa apenas `MYSQL_ROOT_PASSWORD: ${DB_PASS}` quando `DB_USER=root`. Use sempre um usuário dedicado (`DB_USER=crescent`) ou garanta que o `.env` não defina `DB_USER=root`.
+
+**`DOCKER_SERVICE`:** nome do serviço alvo para `php crecli.php docker <cmd>`. Padrão `app`. Override via `.env`.
 
 Arquivos Docker:
 - `Dockerfile` — PHP 8.3-cli + Swoole (PECL) + pdo_mysql + opcache
@@ -489,6 +516,11 @@ php crecli.php routes                      # lista rotas registradas
 php crecli.php test [arquivo]              # roda tests/test-*.php (ou arquivo específico)
 php crecli.php serve [porta=8000]          # servidor built-in PHP (modo tradicional)
 php crecli.php swoole:start [host] [p]     # inicia Swoole HTTP+WebSocket (requer ext swoole)
+
+php crecli.php docker:up                   # docker compose up -d
+php crecli.php docker:rebuild              # docker compose up --build -d (rebuild imagem)
+php crecli.php docker:restart [serviço]    # reinicia tudo ou um serviço (app/db/redis)
+php crecli.php docker <cmd> [args]         # proxy: executa crecli dentro do container
 ```
 
 ### Estrutura de módulo gerada por make:module posts
@@ -641,3 +673,6 @@ REDIS_EXTERNAL_PORT=6379     # porta Redis no host (docker)
 | Conexão WS recusada imediatamente | Caminho não tem rota `$app->ws()` registrada | Registrar a rota em `swoole.php` |
 | `runWithSwoole()` em `app.php` | Dois entry points misturados | Usar `run()` em `app.php`, `runWithSwoole()` em `swoole.php` |
 | `Extension swoole not loaded` local | Swoole não instalado | `pecl install swoole` ou usar `docker compose up` |
+| `MYSQL_USER=root` causa erro no container | MySQL 8 rejeita root como MYSQL_USER | Usar `DB_USER=crescent` (usuário dedicado); root só via `DB_ROOT_PASS` |
+| `header_remove()` warning em Swoole | Função nativa de headers não funciona em CLI | Já corrigido com `PHP_SAPI !== 'cli'` em security.php |
+| Números de usuário WS pulam (1, 18, 26...) | `fd` é descritor do SO, consumido também por HTTP | Usar contador sequencial interno em vez de `$ctx->fd` como identificador visível |

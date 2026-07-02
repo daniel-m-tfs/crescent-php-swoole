@@ -63,8 +63,10 @@ class Security
                 $ctx->header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
             }
 
-            // Remove header que expõe tecnologia
-            header_remove('X-Powered-By');
+            // Remove header que expõe tecnologia (não aplicável em modo Swoole/CLI)
+            if (PHP_SAPI !== 'cli') {
+                header_remove('X-Powered-By');
+            }
 
             // ── Rate limiting ────────────────────────────────────────────────
             if ($opts['rate_limit'] > 0) {
