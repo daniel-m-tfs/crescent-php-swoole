@@ -1,6 +1,7 @@
 # CrescentPHP
 
-Framework MVC ultra leve para PHP — sem Composer, sem dependências, funciona até nas hospedagens de R$10/mês.
+Framework MVC ultra leve para PHP — sem Composer, sem dependências.
+Funciona em hospedagens tradicionais de R$10/mês **e** em containers Docker com Swoole para alta performance e WebSockets em tempo real.
 Inspirado no [Crescent Framework](https://crescent.tyne.com.br) (Lua).
 
 > **Template de repositório GitHub** — use como base para novos projetos.
@@ -8,6 +9,8 @@ Inspirado no [Crescent Framework](https://crescent.tyne.com.br) (Lua).
 ---
 
 ## Início rápido
+
+### Modo tradicional (Apache / Nginx / hospedagem barata)
 
 ```bash
 # 1. Clone o template
@@ -24,6 +27,21 @@ php crecli.php migrate
 # 4. Servidor de desenvolvimento
 php crecli.php serve
 # acesse http://localhost:8000
+```
+
+### Modo Swoole + Docker (HTTP assíncrono + WebSocket)
+
+```bash
+# 1. Clone e configure
+cp .env.example .env
+
+# 2. Suba os containers (app + MySQL + Redis)
+docker compose up --build
+# HTTP:      http://localhost:9501
+# WebSocket: ws://localhost:9501/ws/chat
+
+# Ou localmente (requer extensão swoole)
+php crecli.php swoole:start
 ```
 
 ---
@@ -65,7 +83,7 @@ $app->group('/api', function($app) {
 $app->run();
 ```
 
-**Métodos disponíveis:** `get`, `post`, `put`, `patch`, `delete`, `route` (múltiplos métodos), `group`.
+**Métodos disponíveis:** `get`, `post`, `put`, `patch`, `delete`, `route` (múltiplos métodos), `group`, `ws` (WebSocket).
 
 **Retorno automático do handler:**
 | Tipo de retorno | Comportamento |
@@ -289,6 +307,63 @@ $app->group('/admin', function($app) {
 | `Auth::required()` | Exige JWT válido, popula `$ctx->state['user']` |
 | `Auth::optional()` | Popula user se token presente, não bloqueia |
 
+---
+
+## WebSocket (modo Swoole)
+
+Registre rotas WebSocket com `$app->ws()` em `swoole.php`. O servidor HTTP e WebSocket rodam na **mesma porta**.
+
+```php
+use Crescent\Core\WsContext;
+
+$app->ws(
+    path: '/ws/chat',
+
+    onOpen: function (WsContext $ctx): void {
+        $ctx->push(['event' => 'connected', 'fd' => $ctx->fd]);
+    },
+
+    onMessage: function (WsContext $ctx, string $rawData): void {
+        $payload = json_decode($rawData, true);
+
+        // broadcast para todos os clientes conectados
+        $ctx->broadcast([
+            'event' => 'message',
+            'from'  => $ctx->fd,
+            'text'  => htmlspecialchars($payload['text'] ?? ''),
+        ]);
+    },
+
+    onClose: function (WsContext $ctx): void {
+        $ctx->broadcast(['event' => 'user_left', 'fd' => $ctx->fd]);
+    },
+);
+
+// Rota com parâmetro dinâmico
+$app->ws('/ws/notify/:channel',
+    onOpen: fn(WsContext $ctx) => $ctx->push([
+        'event'   => 'subscribed',
+        'channel' => $ctx->params['channel'],
+    ]),
+);
+
+$app->runWithSwoole(); // em vez de $app->run()
+```
+
+### API do WsContext
+
+| Método / Propriedade | Descrição |
+|---|---|
+| `$ctx->fd` | File descriptor (ID único da conexão) |
+| `$ctx->path` | Caminho de URL da conexão |
+| `$ctx->params['room']` | Parâmetros de rota (`/:room`) |
+| `$ctx->query['token']` | Query string da URL de upgrade |
+| `$ctx->state['user']` | Bag de estado entre eventos |
+| `$ctx->push($data)` | Envia para **esta** conexão (string ou array→JSON) |
+| `$ctx->broadcast($data, $excludeFds)` | Envia para **todas** as conexões |
+| `$ctx->close()` | Encerra esta conexão |
+| `$ctx->connectionCount()` | Número de conexões WebSocket ativas |
+
 ### Gerar e verificar tokens JWT
 
 ```php
@@ -492,25 +567,67 @@ Tests::describe('UserModel', function () {
 
 ---
 
+## Docker
+
+```yaml
+# docker-compose.yml inclui:
+# - app       → PHP 8.3 + Swoole + PDO MySQL (porta 9501)
+# - db        → MySQL 8.0 (porta 3306, acessível somente local)
+# - redis     → Redis 7 (cache, sessões, pub/sub)
+```
+
+```bash
+# Subir tudo
+docker compose up --build
+
+# Recriar apenas o app após alterar código
+docker compose restart app
+
+# Executar comandos CLI dentro do container
+docker compose exec app php crecli.php migrate
+docker compose exec app php crecli.php make:module products
+```
+
+Variáveis de ambiente do Docker (defina no `.env` ou em `docker-compose.yml`):
+
+| Variável | Padrão | Descrição |
+|---|---|---|
+| `APP_PORT` | `9501` | Porta exposta no host |
+| `SWOOLE_HOST` | `0.0.0.0` | Host de bind do Swoole |
+| `SWOOLE_PORT` | `9501` | Porta interna do Swoole |
+| `DB_ROOT_PASS` | `rootsecret` | Senha root do MySQL |
+| `REDIS_EXTERNAL_PORT` | `6379` | Porta Redis no host |
+
+---
+
 ## Estrutura de arquivos
 
 ```
 meu-projeto/
-├── app.php                        # Ponto de entrada
+├── app.php                        # Ponto de entrada (Apache/Nginx)
+├── swoole.php                     # Ponto de entrada Swoole (HTTP + WebSocket)
 ├── crecli.php                     # CLI
 ├── .env.example                   # Template de variáveis
 ├── .htaccess                      # Rewrite rules para Apache
 ├── config/
 │   ├── development.php
 │   └── production.php
+├── Dockerfile                     # PHP 8.3 + Swoole + PDO MySQL
+├── docker-compose.yml             # App + MySQL 8 + Redis 7
+├── docker/
+│   └── php.ini                    # Configuração PHP otimizada para Swoole
 ├── crescent/                      # Core do framework (não edite)
 │   ├── init.php                   # Bootstrap + autoloader
 │   ├── server.php                 # Classe App principal
 │   ├── core/
 │   │   ├── context.php            # Contexto HTTP
-│   │   ├── request.php            # Request
-│   │   ├── response.php           # Response
-│   │   ├── router.php             # Roteador
+│   │   ├── request.php            # Request (PHP tradicional)
+│   │   ├── response.php           # Response (PHP tradicional)
+│   │   ├── swooleRequest.php      # Adapta Swoole\Http\Request → Request
+│   │   ├── swooleResponse.php     # Adapta Swoole\Http\Response → Response
+│   │   ├── wsRouter.php           # Roteador de conexões WebSocket
+│   │   ├── wsContext.php          # Contexto WebSocket (push/broadcast/close)
+│   │   ├── router.php             # Roteador HTTP
 │   │   └── model.php              # Base Model (PDO singleton)
 │   ├── middleware/
 │   │   ├── auth.php               # JWT HS256
@@ -574,7 +691,12 @@ meu-projeto/
 
 ## Requisitos
 
+**Modo tradicional (hospedagem barata):**
 - PHP 8.1+
-- Extensão PDO + PDO_MySQL (ou PDO_SQLite para SQLite)
+- Extensão PDO + PDO_MySQL (ou PDO_SQLite)
 - Apache com `mod_rewrite` **ou** servidor PHP built-in (`serve`)
 - Sem Composer, sem nada além do PHP padrão de hospedagem
+
+**Modo Swoole (Docker ou VPS):**
+- Docker + Docker Compose **ou** PHP 8.1+ com extensão `swoole` instalada
+- A mesma codebase funciona nos dois modos — basta mudar o entry point

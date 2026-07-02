@@ -12,9 +12,9 @@ namespace Crescent\Core;
  */
 class Response
 {
-    private int    $statusCode = 200;
-    private array  $headers    = [];
-    private bool   $sent       = false;
+    protected int    $statusCode = 200;
+    protected array  $headers    = [];
+    protected bool   $sent       = false;
 
     // ─── Fluent setters ──────────────────────────────────────────────────────
 
@@ -126,7 +126,7 @@ class Response
         return $root . '/' . $template;
     }
 
-    private function send(string $body): void
+    protected function send(string $body): void
     {
         if ($this->sent) {
             return;

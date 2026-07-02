@@ -1,7 +1,7 @@
 # CrescentPHP — Referência para IA
 
 > NÃO publicar em produção. Arquivo de contexto para assistentes de IA.
-> PHP 8.1+ | Sem Composer | MVC | PDO singleton | JWT via cookie HttpOnly
+> PHP 8.1+ | Sem Composer | MVC | PDO singleton | JWT via cookie HttpOnly | Swoole (HTTP assíncrono + WebSocket)
 
 ---
 
@@ -21,6 +21,10 @@ O autoloader resolve `Namespace\Class` → arquivo com `lcfirst(ClassName)`.
 - `Crescent\Utils\Hash`          → `crescent/utils/hash.php`
 - `Crescent\Utils\Mailer`        → `crescent/utils/mailer.php`
 - `Crescent\Utils\View`          → `crescent/utils/view.php`
+- `Crescent\Core\SwooleRequest`  → `crescent/core/swooleRequest.php`
+- `Crescent\Core\SwooleResponse` → `crescent/core/swooleResponse.php`
+- `Crescent\Core\WsRouter`       → `crescent/core/wsRouter.php`
+- `Crescent\Core\WsContext`      → `crescent/core/wsContext.php`
 - `App\Users\Controllers\UserController` → `src/users/controllers/userController.php`
 - `App\Auth\Models\AuthModel`    → `src/auth/models/authModel.php`
 
@@ -31,16 +35,21 @@ O autoloader resolve `Namespace\Class` → arquivo com `lcfirst(ClassName)`.
 ## ESTRUTURA DE ARQUIVOS
 
 ```
-app.php                   Ponto de entrada; registra middlewares, rotas, módulos, $app->run()
+app.php                   Ponto de entrada Apache/Nginx; registra middlewares, rotas, módulos, $app->run()
+swoole.php                Ponto de entrada Swoole; mesmas rotas + $app->ws() + $app->runWithSwoole()
 crecli.php                CLI
 crescent/init.php         Bootstrap: define APP_ROOT/CRESCENT_ROOT, registra autoloader,
                           carrega .env, config/ENV.php, view.php, retorna new App()
-crescent/server.php       class App (get/post/put/patch/delete/route/group/use/run)
+crescent/server.php       class App (get/post/put/patch/delete/route/group/use/ws/run/runWithSwoole/dispatch)
 crescent/core/
   context.php             $ctx — params, query, body, state, json(), view(), redirect()...
-  request.php             Leitura de método, path, headers, body, IP
+  request.php             Leitura de método, path, headers, body, IP (PHP tradicional)
   response.php            json(), view(), html(), text(), redirect(), noContent()
-  router.php              Matching de rotas com parâmetros /:id
+  swooleRequest.php       Adapta \Swoole\Http\Request → Request (sem ler $_SERVER)
+  swooleResponse.php      Estende Response, sobrescreve send() para usar $swoole->end()
+  wsRouter.php            Roteamento de conexões WebSocket com parâmetros /:param
+  wsContext.php           Contexto WS: push(), broadcast(), close(), connectionCount()
+  router.php              Matching de rotas HTTP com parâmetros /:id
   model.php               Classe base Model (PDO singleton)
 crescent/middleware/
   auth.php                JWT HS256 — required(), optional(), role(), issueToken(), revokeCurrentToken()
@@ -61,13 +70,15 @@ src/
   shared/components/      Componentes reutilizáveis: layout.php, card.php, alert.php
   auth/                   Módulo de autenticação completo
   users/                  Módulo de usuários
-  tasks/                  Módulo gerado por make:module
 migrations/               Arquivos de migration com timestamp
 tests/                    test-*.php — carregados por crecli test
 logs/                     Criado automaticamente
 config/
   development.php
   production.php
+Dockerfile                PHP 8.3-cli + Swoole + PDO MySQL + Opcache
+docker-compose.yml        Serviços: app (Swoole), db (MySQL 8), redis (Redis 7)
+docker/php.ini            Configuração PHP otimizada para Swoole
 ```
 
 ---
@@ -75,7 +86,7 @@ config/
 ## APP & ROTAS
 
 ```php
-// app.php
+// app.php (Apache/Nginx)
 $app = require __DIR__ . '/crescent/init.php';
 
 $app->use(Security::handle());
@@ -101,7 +112,22 @@ $app->get('/perfil',     [Auth::required(), fn($ctx) => ...]);
 require __DIR__ . '/src/users/routes/usersRoutes.php';
 require __DIR__ . '/src/auth/init.php';
 
-$app->run();
+$app->run(); // modo tradicional
+```
+
+```php
+// swoole.php (Docker / VPS com Swoole)
+// Mesmas rotas HTTP acima, mais:
+use Crescent\Core\WsContext;
+
+$app->ws('/ws/chat',
+    onOpen:    fn(WsContext $ctx) => $ctx->push(['event' => 'connected']),
+    onMessage: fn(WsContext $ctx, string $data) => $ctx->broadcast($data),
+    onClose:   fn(WsContext $ctx) => null,
+);
+
+$app->runWithSwoole(); // em vez de $app->run()
+// Não chame $app->run() e $app->runWithSwoole() no mesmo entry point.
 ```
 
 **Retorno automático do handler:**
@@ -134,6 +160,73 @@ $ctx->ip()
 $ctx->bearerToken()             // Authorization: Bearer ...
 $ctx->requestHeader('accept')
 ```
+
+---
+
+## WEBSOCKET (modo Swoole)
+
+Registrado em `swoole.php` — **nunca em `app.php`**.
+
+```php
+use Crescent\Core\WsContext;
+
+// Rota estática
+$app->ws('/ws/chat',
+    onOpen:    function (WsContext $ctx): void {
+        $ctx->push(['event' => 'connected', 'fd' => $ctx->fd]);
+    },
+    onMessage: function (WsContext $ctx, string $rawData): void {
+        $payload = json_decode($rawData, true);
+        $ctx->broadcast(['event' => 'message', 'from' => $ctx->fd, 'text' => $payload['text'] ?? '']);
+    },
+    onClose:   function (WsContext $ctx): void {
+        $ctx->broadcast(['event' => 'user_left', 'fd' => $ctx->fd]);
+    },
+);
+
+// Rota dinâmica com parâmetro
+$app->ws('/ws/notify/:channel',
+    onOpen: fn(WsContext $ctx) => $ctx->push(['event' => 'subscribed', 'channel' => $ctx->params['channel']]),
+);
+
+$app->runWithSwoole(); // NÃO $app->run()
+```
+
+### WsContext API
+
+```php
+$ctx->fd                             // int — file descriptor (ID único da conexão)
+$ctx->path                           // string — caminho da URL de upgrade
+$ctx->params['room']                 // parâmetros de rota (/:room)
+$ctx->query['token']                 // query string da URL de upgrade
+$ctx->state['user'] = $payload;      // bag de estado entre eventos (persiste open→message→close)
+
+$ctx->push($data)                    // envia para ESTA conexão (string|array→JSON)
+$ctx->broadcast($data, $exclude=[]) // envia para TODAS as conexões
+$ctx->close()                        // fecha esta conexão
+$ctx->connectionCount()              // número de WS ativos
+```
+
+### Regras
+- Rotas WS não registradas: conexão recusada automaticamente (fd fechado)
+- `onMessage` recebe `(WsContext $ctx, string $rawData)` — $rawData é sempre a string crua
+- HTTP e WebSocket usam a mesma porta no Swoole
+
+---
+
+## DOCKER
+
+```bash
+docker compose up --build          # sobe app (Swoole) + MySQL 8 + Redis 7
+docker compose restart app         # recarrega após mudar código
+docker compose exec app php crecli.php migrate
+docker compose exec app php crecli.php swoole:start
+```
+
+Arquivos Docker:
+- `Dockerfile` — PHP 8.3-cli + Swoole (PECL) + pdo_mysql + opcache
+- `docker-compose.yml` — serviços: `app`, `db`, `redis`; rede interna `crescent`
+- `docker/php.ini` — opcache otimizado, log de erros em `/var/www/logs/`
 
 ---
 
@@ -394,7 +487,8 @@ php crecli.php migrate:status              # lista status
 
 php crecli.php routes                      # lista rotas registradas
 php crecli.php test [arquivo]              # roda tests/test-*.php (ou arquivo específico)
-php crecli.php serve [porta=8000]          # servidor built-in PHP
+php crecli.php serve [porta=8000]          # servidor built-in PHP (modo tradicional)
+php crecli.php swoole:start [host] [p]     # inicia Swoole HTTP+WebSocket (requer ext swoole)
 ```
 
 ### Estrutura de módulo gerada por make:module posts
@@ -523,6 +617,13 @@ MAIL_PASS=
 MAIL_FROM=
 MAIL_FROM_NAME=
 MAIL_ENCRYPTION=tls
+
+# Swoole / Docker
+SWOOLE_HOST=0.0.0.0
+SWOOLE_PORT=9501
+APP_PORT=9501                # porta exposta no host (docker compose)
+DB_ROOT_PASS=rootsecret      # senha root MySQL (docker)
+REDIS_EXTERNAL_PORT=6379     # porta Redis no host (docker)
 ```
 
 ---
@@ -536,4 +637,7 @@ MAIL_ENCRYPTION=tls
 | Componente "Call to unknown function e()" | `view.php` não carregado ainda | Adicionar `function_exists('e') \|\| require_once ...view.php` no topo |
 | `strlen()` falhando em testes UTF-8 | `strlen` conta bytes, não caracteres | Usar `mb_strlen()` |
 | Arquivo de view não encontrado | Path passado para `$ctx->view()` deve ser relativo a `/src/` | Ex: `'users/views/users_all.php'` |
-| Acesso direto a `crescent/` em produção | `.htaccess` com rule faltando | Regra `RewriteRule ^(crescent|src|...)` → 403 já incluída |
+| Acesso direto a `crescent/` em produção | `.htaccess` com rule faltando | Regra `RewriteRule ^(crescent\|src\|...)` → 403 já incluída |
+| Conexão WS recusada imediatamente | Caminho não tem rota `$app->ws()` registrada | Registrar a rota em `swoole.php` |
+| `runWithSwoole()` em `app.php` | Dois entry points misturados | Usar `run()` em `app.php`, `runWithSwoole()` em `swoole.php` |
+| `Extension swoole not loaded` local | Swoole não instalado | `pecl install swoole` ou usar `docker compose up` |

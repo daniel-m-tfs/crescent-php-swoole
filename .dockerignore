@@ -1,0 +1,39 @@
+# Dependências do Composer (se usar no futuro)
+vendor/
+
+# Logs gerados em runtime
+logs/*.log
+logs/*.bak
+
+# Cache e temporários
+*.cache
+*.tmp
+
+# Credenciais e ambiente
+.env
+.env.*
+!.env.example
+
+# Git
+.git/
+.gitignore
+
+# Testes
+tests/
+
+# Documentação
+*.md
+docs/
+
+# IDEs e editores
+.idea/
+.vscode/
+*.sublime-*
+
+# macOS
+.DS_Store
+__MACOSX/
+
+# Node (se houver assets frontend)
+node_modules/
+npm-debug.log*

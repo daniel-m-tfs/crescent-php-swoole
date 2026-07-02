@@ -6,31 +6,42 @@ use Crescent\Core\Router;
 use Crescent\Core\Request;
 use Crescent\Core\Response;
 use Crescent\Core\Context;
+use Crescent\Core\SwooleRequest;
+use Crescent\Core\SwooleResponse;
+use Crescent\Core\WsRouter;
+use Crescent\Core\WsContext;
 
 /**
  * Classe principal do CrescentPHP.
  *
- * Uso em app.php:
+ * Uso em app.php (Apache/Nginx):
  *
  *   $app = require __DIR__ . '/crescent/init.php';
- *
  *   $app->use(Cors::handle());
- *   $app->use(Security::handle());
- *
  *   $app->get('/', fn($ctx) => $ctx->json(['status' => 'ok']));
- *
- *   require __DIR__ . '/src/users/routes/usersRoutes.php';
- *
  *   $app->run();
+ *
+ * Uso em swoole.php (Docker + Swoole):
+ *
+ *   $app->ws('/ws/chat',
+ *       onOpen:    fn(WsContext $ctx) => $ctx->push(['event' => 'connected']),
+ *       onMessage: fn(WsContext $ctx, string $data) => $ctx->broadcast($data),
+ *   );
+ *   $app->runWithSwoole();
  */
 class App
 {
-    private Router $router;
-    private array  $globalMiddlewares = [];
+    private Router   $router;
+    private WsRouter $wsRouter;
+    private array    $globalMiddlewares = [];
+
+    /** @var array<int, array{ctx: WsContext, route: array}> */
+    private array $wsConnections = [];
 
     public function __construct()
     {
-        $this->router = new Router();
+        $this->router   = new Router();
+        $this->wsRouter = new WsRouter();
     }
 
     // ─── Middlewares globais ──────────────────────────────────────────────────
@@ -104,28 +115,163 @@ class App
         }, $middlewares);
     }
 
+    // ─── WebSocket ────────────────────────────────────────────────────────────
+
+    /**
+     * Registra uma rota WebSocket.
+     *
+     * Os callbacks recebem um WsContext como primeiro argumento.
+     * onMessage recebe também a string de dados brutos como segundo argumento.
+     *
+     * Exemplo:
+     *   $app->ws('/ws/chat',
+     *       onOpen:    fn(WsContext $ctx) => $ctx->push(['event' => 'connected']),
+     *       onMessage: fn(WsContext $ctx, string $data) => $ctx->broadcast($data),
+     *       onClose:   fn(WsContext $ctx) => null,
+     *   );
+     */
+    public function ws(
+        string    $path,
+        ?callable $onOpen    = null,
+        ?callable $onMessage = null,
+        ?callable $onClose   = null,
+    ): void {
+        $this->wsRouter->add($path, $onOpen, $onMessage, $onClose);
+    }
+
     // ─── Execução ─────────────────────────────────────────────────────────────
 
     /**
-     * Processa a requisição atual e envia a resposta.
+     * Processa a requisição atual via Apache/Nginx/servidor built-in.
      * Deve ser chamado uma única vez, no final de app.php.
      */
     public function run(): void
     {
-        $request  = new Request();
-        $response = new Response();
+        $this->dispatch(new Request(), new Response());
+    }
 
+    /**
+     * Inicia o servidor Swoole (HTTP + WebSocket no mesmo porta).
+     * Requer a extensão `swoole` instalada.
+     *
+     * Deve ser chamado no final de swoole.php.
+     */
+    public function runWithSwoole(string $host = '0.0.0.0', int $port = 9501): void
+    {
+        if (!extension_loaded('swoole')) {
+            throw new \RuntimeException(
+                'A extensão Swoole não está instalada. ' .
+                'Instale com: pecl install swoole'
+            );
+        }
+
+        $isDev   = \Crescent\Utils\Env::isDevelopment();
+        $env     = $isDev ? 'development' : 'production';
+        $workers = swoole_cpu_num();
+
+        $server = new \Swoole\WebSocket\Server($host, $port);
+
+        $server->set([
+            'worker_num'               => $workers,
+            'daemonize'                => false,
+            'log_file'                 => APP_ROOT . '/logs/swoole.log',
+            'log_level'                => \SWOOLE_LOG_WARNING,
+            'heartbeat_check_interval' => 30,
+            'heartbeat_idle_time'      => 60,
+            'open_http_protocol'       => true,
+        ]);
+
+        // ── HTTP ──────────────────────────────────────────────────────────────
+        $server->on('request', function (
+            \Swoole\Http\Request  $swooleReq,
+            \Swoole\Http\Response $swooleRes,
+        ): void {
+            $request  = new SwooleRequest($swooleReq);
+            $response = new SwooleResponse($swooleRes);
+            $this->dispatch($request, $response);
+        });
+
+        // ── WebSocket: nova conexão ───────────────────────────────────────────
+        $server->on('open', function (
+            \Swoole\WebSocket\Server $server,
+            \Swoole\Http\Request     $swooleReq,
+        ): void {
+            $uri    = $swooleReq->server['request_uri'] ?? '/';
+            $path   = rtrim(parse_url($uri, PHP_URL_PATH) ?? '/', '/') ?: '/';
+            $query  = $swooleReq->get ?? [];
+
+            $route = $this->wsRouter->match($path);
+
+            if ($route === null) {
+                // Caminho sem rota WS registrada → recusa a conexão
+                $server->close($swooleReq->fd);
+                return;
+            }
+
+            $ctx = new WsContext($server, $swooleReq->fd, $path, $route['params'], $query);
+
+            $this->wsConnections[$swooleReq->fd] = ['ctx' => $ctx, 'route' => $route];
+
+            if ($route['open'] !== null) {
+                ($route['open'])($ctx);
+            }
+        });
+
+        // ── WebSocket: mensagem recebida ──────────────────────────────────────
+        $server->on('message', function (
+            \Swoole\WebSocket\Server $server,
+            \Swoole\WebSocket\Frame  $frame,
+        ): void {
+            $conn = $this->wsConnections[$frame->fd] ?? null;
+            if ($conn === null) {
+                return;
+            }
+
+            if ($conn['route']['message'] !== null) {
+                ($conn['route']['message'])($conn['ctx'], $frame->data);
+            }
+        });
+
+        // ── WebSocket: conexão encerrada ──────────────────────────────────────
+        $server->on('close', function (
+            \Swoole\WebSocket\Server $server,
+            int $fd,
+        ): void {
+            $conn = $this->wsConnections[$fd] ?? null;
+
+            if ($conn !== null) {
+                if ($conn['route']['close'] !== null) {
+                    ($conn['route']['close'])($conn['ctx']);
+                }
+                unset($this->wsConnections[$fd]);
+            }
+        });
+
+        // ── Boot ──────────────────────────────────────────────────────────────
+        echo "\033[32m[CrescentPHP Swoole] Servidor iniciado\033[0m\n";
+        echo "\033[36m  ► http://{$host}:{$port}  (HTTP + WebSocket)\033[0m\n";
+        echo "\033[36m  ► Ambiente: {$env}  |  Workers: {$workers}\033[0m\n";
+        echo "\033[33m  Pressione Ctrl+C para encerrar.\033[0m\n\n";
+
+        $server->start();
+    }
+
+    /**
+     * Processa uma requisição com os objetos Request/Response fornecidos.
+     * Usado por run() (PHP built-in) e runWithSwoole() (adaptadores Swoole).
+     */
+    public function dispatch(Request $request, Response $response): void
+    {
         $match = $this->router->match($request->method, $request->path);
 
         if ($match === null) {
-            $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
+            $accept = $request->header('accept') ?? '';
             $isApi  = str_starts_with($request->path, '/api/')
                    || (str_contains($accept, 'application/json') && !str_contains($accept, 'text/html'));
             if ($isApi) {
                 $response->json(['error' => 'Rota não encontrada'], 404);
             } else {
-                http_response_code(404);
-                include APP_ROOT . '/src/shared/views/404.php';
+                $response->status(404)->view('shared/views/404.php');
             }
             return;
         }

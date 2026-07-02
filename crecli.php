@@ -19,6 +19,7 @@
  *   routes                    — Lista todas as rotas registradas
  *   test [arquivo]            — Roda testes (todos ou específico)
  *   serve [porta]             — Inicia servidor PHP built-in (dev)
+ *   swoole:start [host] [p]   — Inicia servidor Swoole (HTTP + WebSocket)
  */
 
 declare(strict_types=1);
@@ -73,6 +74,7 @@ class CrescentCLI
             'routes'          => 'listRoutes',
             'test'            => 'runTests',
             'serve'           => 'serve',
+            'swoole:start'    => 'swooleStart',
             'help'            => 'help',
         ];
 
@@ -337,6 +339,31 @@ class CrescentCLI
         passthru("php -S {$host}:{$port} " . escapeshellarg(APP_ROOT . '/app.php'));
     }
 
+    // ─── Swoole ───────────────────────────────────────────────────────────────
+
+    private function swooleStart(): void
+    {
+        if (!extension_loaded('swoole')) {
+            $this->error('A extensão Swoole não está instalada.');
+            $this->info('Instale localmente : pecl install swoole');
+            $this->info('Ou use o Docker    : docker compose up');
+            exit(1);
+        }
+
+        $host = $this->args[0] ?? \Crescent\Utils\Env::get('SWOOLE_HOST', '0.0.0.0');
+        $port = $this->args[1] ?? \Crescent\Utils\Env::get('SWOOLE_PORT', '9501');
+
+        $this->info("🌙 CrescentPHP Swoole em http://{$host}:{$port}");
+        $this->info("   WebSocket: ws://{$host}:{$port}/ws/*");
+        $this->info("   Ctrl+C para parar\n");
+
+        // Configura as variáveis de ambiente para swoole.php
+        putenv("SWOOLE_HOST={$host}");
+        putenv("SWOOLE_PORT={$port}");
+
+        require APP_ROOT . '/swoole.php';
+    }
+
     // ─── Help ─────────────────────────────────────────────────────────────────
 
     private function help(): void
@@ -360,12 +387,19 @@ class CrescentCLI
         \033[33mUtilitários:\033[0m
           routes                    Lista rotas registradas
           test [arquivo]            Roda testes
-          serve [porta]             Inicia servidor de desenvolvimento
+          serve [porta]             Inicia servidor de desenvolvimento (PHP built-in)
+          swoole:start [host] [p]   Inicia servidor Swoole (HTTP + WebSocket)
+
+        \033[33mDocker:\033[0m
+          docker compose up         Sobe app + MySQL + Redis com Swoole
+          docker compose up --build Reconstrói a imagem e sobe
 
         \033[2mExemplos:\033[0m
           php crecli.php make:module products
           php crecli.php migrate
           php crecli.php serve 3000
+          php crecli.php swoole:start
+          php crecli.php swoole:start 127.0.0.1 9502
 
         HELP;
     }

@@ -1,0 +1,83 @@
+services:
+
+  # ─── App (CrescentPHP + Swoole) ─────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crescent_app
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-9501}:9501"
+    environment:
+      APP_ENV:      ${APP_ENV:-development}
+      APP_KEY:      ${APP_KEY:-change_me_in_dotenv}
+      DB_DRIVER:    mysql
+      DB_HOST:      db
+      DB_PORT:      3306
+      DB_NAME:      ${DB_NAME:-crescent}
+      DB_USER:      ${DB_USER:-crescent}
+      DB_PASS:      ${DB_PASS:-crescent}
+      REDIS_HOST:   redis
+      REDIS_PORT:   6379
+      SWOOLE_HOST:  0.0.0.0
+      SWOOLE_PORT:  9501
+    volumes:
+      # Persiste logs fora do container
+      - ./logs:/var/www/logs
+      # Em desenvolvimento, monta o código para hot-reload manual
+      # (reiniciar o container após mudanças: docker compose restart app)
+      - ./src:/var/www/src
+      - ./config:/var/www/config
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - crescent
+
+  # ─── MySQL 8 ─────────────────────────────────────────────────────────────────
+  db:
+    image: mysql:8.0
+    container_name: crescent_db
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE:      ${DB_NAME:-crescent}
+      MYSQL_USER:          ${DB_USER:-crescent}
+      MYSQL_PASSWORD:      ${DB_PASS:-crescent}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASS:-rootsecret}
+    ports:
+      # Expõe apenas localmente para acesso por ferramentas (TablePlus, DBeaver)
+      - "127.0.0.1:${DB_EXTERNAL_PORT:-3306}:3306"
+    volumes:
+      - crescent_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASS:-rootsecret}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - crescent
+
+  # ─── Redis ───────────────────────────────────────────────────────────────────
+  # Usado para cache, sessões e pub/sub de eventos em produção
+  redis:
+    image: redis:7-alpine
+    container_name: crescent_redis
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    ports:
+      - "127.0.0.1:${REDIS_EXTERNAL_PORT:-6379}:6379"
+    networks:
+      - crescent
+
+# ─── Rede interna ────────────────────────────────────────────────────────────
+networks:
+  crescent:
+    driver: bridge
+
+# ─── Volumes persistentes ────────────────────────────────────────────────────
+volumes:
+  crescent_db:
